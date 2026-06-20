@@ -240,9 +240,48 @@ $action = strtolower(trim(
     $_GET['action'] ?? $_POST['action'] ?? ($body['action'] ?? '')
 ));
 $conn = db_connect();
-ensure_tables($conn);
+mysqli_set_charset($conn, 'utf8mb4');
+
+// Only run table-creation check for non-performance-critical actions
+$fast_actions = ['quick', 'health', 'ping', 'login', 'verify_token', 'wallet', 'funding_accounts', 'profile', 'init'];
+if (!in_array($action, $fast_actions)) {
+    ensure_tables($conn);
+}
 
 switch ($action) {
+
+// ── QUICK — ultra-fast balance + account in ONE query (for splash/home screen) ─
+case 'quick':
+    $t = get_token_from_request();
+    if (empty($t)) api_error('token required', 401);
+    $ts = mysqli_real_escape_string($conn, $t);
+    $q  = mysqli_query($conn,
+        "SELECT u.id, u.email, u.sname, u.oname,
+                u.acc_no, u.bank_name, u.acc_name,
+                u.acc_no2, u.bank_name2, u.acc_name2,
+                COALESCE(w.balance, 0) AS balance
+           FROM users_tbl u
+           LEFT JOIN wallet_tbl w ON w.user_id = u.email
+          WHERE u.token = '$ts' AND u.status = 1 LIMIT 1");
+    if (!$q || mysqli_num_rows($q) === 0) api_error('Unauthorized', 401);
+    $r = mysqli_fetch_assoc($q);
+    $accounts = [];
+    if (!empty($r['acc_no']))  $accounts[] = ['provider' => 'PaymentPoint', 'bank_name' => $r['bank_name'],  'account_number' => $r['acc_no'],  'account_name' => $r['acc_name']];
+    if (!empty($r['acc_no2'])) $accounts[] = ['provider' => 'PaymentPoint', 'bank_name' => $r['bank_name2'], 'account_number' => $r['acc_no2'], 'account_name' => $r['acc_name2']];
+    $primary = $accounts[0] ?? null;
+    header('Cache-Control: no-store');
+    api_response([
+        'balance'        => floatval($r['balance']),
+        'wallet_balance' => floatval($r['balance']),
+        'has_account'    => !empty($accounts),
+        'acc_no'         => $primary['account_number'] ?? '',
+        'bank_name'      => $primary['bank_name']      ?? '',
+        'acc_name'       => $primary['account_name']   ?? '',
+        'account_number' => $primary['account_number'] ?? '',
+        'account_name'   => $primary['account_name']   ?? '',
+        'accounts'       => $accounts,
+    ]);
+    break;
 
 // ── HEALTH ────────────────────────────────────────────────────────────────────
 case 'health':
