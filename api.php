@@ -97,9 +97,9 @@ function require_auth($conn) {
 
 // ── PaymentPoint virtual account helpers ─────────────────────────────────────
 function pp_create_account($conn, $email, $name, $phone) {
-    $apiSecret  = 'f243601a0abd0415faac1ba6ac78e100d831e33b9ae37b1db6163aceb30dee221eb59362b4103594cf680e96b0e6135efeb7f3e2046c001cd38fb962';
-    $apiKey     = '725058f9c9f42ab1aef6c962286bd449af78c43b';
-    $businessId = 'a65e1352032347a56134852409d3996e4819f891';
+    $apiSecret  = '03f963e7847b654a0405379dfc57b246a5f8cfabe1701ed07271db21171071c5be0f1d32b2bb15db02152065df50533c88a4cb2483f572cb96dedd76';
+    $apiKey     = '1245c5ad99592ea103dc269977ea6defa9ab4211';
+    $businessId = 'dd22838d6931f41909ef61564ff214d7bb9f32fd';
 
     $phoneDigits = preg_replace('/\D+/', '', (string)$phone);
     if (strlen($phoneDigits) < 11) {
