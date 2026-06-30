@@ -5,7 +5,6 @@ header("Content-Type: application/json");
 include_once 'conn.php';
 require_once 'transactionToken.php';
 
-// 🔥 LOGGER
 function writeLog($filename, $data) {
     $logDir = __DIR__ . "/logs/";
     if (!file_exists($logDir)) mkdir($logDir, 0777, true);
@@ -13,36 +12,34 @@ function writeLog($filename, $data) {
 }
 
 $data = json_decode(file_get_contents("php://input"), true);
-
 writeLog("electricity.log", "PURCHASE REQUEST: " . json_encode($data));
 
-// 🔹 Inputs
-$token      = $data['token'] ?? '';
-$meter      = $data['meter'] ?? '';
-$serviceID  = $data['serviceID'] ?? '';
-$type       = $data['type'] ?? '';
-$amount     = $data['amount'] ?? 0;
-$phone      = $data['phone'] ?? '';
-$pin        = $data['pin'] ?? '';
+$token     = $data['token']     ?? '';
+$meter     = $data['meter']     ?? '';
+$serviceID = $data['serviceID'] ?? '';
+$type      = $data['type']      ?? '';
+$amount    = $data['amount']    ?? 0;
+$phone     = $data['phone']     ?? '';
+$pin       = $data['pin']       ?? '';
 
 if (!$token || !$meter || !$serviceID || !$type || !$amount || !$pin) {
     echo json_encode(["success" => false, "message" => "All fields required"]);
     exit;
 }
 
-// 🔐 Verify user
+// Verify user
 $verify = verifyUserToken($conn, $token);
 if (!$verify['success']) {
     echo json_encode($verify);
     exit;
 }
 
-$user   = $verify['user'];
-$userId = $user['email'];
-$email  = $user['email'];
+$user      = $verify['user'];
+$userId    = $user['email'];
+$email     = $user['email'];
 $userPhone = $user['phone'];
 
-// 🔐 PIN
+// Verify PIN
 if ($pin !== "fingerprint") {
     if (md5($pin) !== $user['pin']) {
         echo json_encode(["success" => false, "message" => "Invalid PIN"]);
@@ -50,107 +47,128 @@ if ($pin !== "fingerprint") {
     }
 }
 
-// 💰 Wallet
+// Check wallet
 $walletQ = mysqli_query($conn, "SELECT balance FROM wallet_tbl WHERE user_id='$userId'");
-$wallet = mysqli_fetch_assoc($walletQ);
+$wallet  = mysqli_fetch_assoc($walletQ);
 
 if (!$wallet || $wallet['balance'] < $amount) {
     echo json_encode(["success" => false, "message" => "Insufficient balance"]);
     exit;
 }
 
-// 🔥 API config
+// Get API config
 $apiQ = mysqli_query($conn, "SELECT * FROM api_settings WHERE api_name='vtpass'");
-$api = mysqli_fetch_assoc($apiQ);
+$api  = mysqli_fetch_assoc($apiQ);
+
+if (!$api) {
+    echo json_encode(["success" => false, "message" => "No active API configured"]);
+    exit;
+}
 
 $url = rtrim($api['api_url'], '/') . "/api/pay";
 
-$requestId = "ELEC_" . time() . "_" . rand(1000,9999);
+// Generate VTPass-compliant request ID (≥20 chars)
+$requestId = date('YmdHis') . "ELC" . rand(100000, 999999);
 
-// 💸 Deduct
+// Deduct wallet
 $newBalance = $wallet['balance'] - $amount;
 mysqli_query($conn, "UPDATE wallet_tbl SET balance='$newBalance' WHERE user_id='$userId'");
 
-// 🔥 Payload
+// VTPass payload
 $params = [
-    "request_id"  => $requestId,
-    "serviceID"   => strtolower($serviceID),
-    "billersCode" => $meter,
+    "request_id"     => $requestId,
+    "serviceID"      => strtolower($serviceID),
+    "billersCode"    => $meter,
     "variation_code" => strtolower($type),
-    "amount"      => $amount,
-    "phone"       => $phone ?: $userPhone
+    "amount"         => (int)$amount,
+    "phone"          => $phone ?: $userPhone
 ];
 
-// 🔥 cURL
+writeLog("electricity.log", "REQUEST PAYLOAD: " . json_encode($params));
+
+// cURL
 $curl = curl_init();
 curl_setopt_array($curl, [
-    CURLOPT_URL => $url,
+    CURLOPT_URL            => $url,
     CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_POST => true,
-    CURLOPT_POSTFIELDS => json_encode($params),
-    CURLOPT_USERPWD => $api['api_key'] . ':' . $api['secret'],
-    CURLOPT_HTTPHEADER => [
-        "Content-Type: application/json",
-    ],
+    CURLOPT_POST           => true,
+    CURLOPT_POSTFIELDS     => json_encode($params),
+    CURLOPT_USERPWD        => $api['api_key'] . ':' . $api['secret'],
+    CURLOPT_HTTPHEADER     => ["Content-Type: application/json"],
+    CURLOPT_TIMEOUT        => 30,
 ]);
 
 $response = curl_exec($curl);
 $err      = curl_error($curl);
 $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-
 curl_close($curl);
 
-// 🔥 Decode
 $res = json_decode($response, true);
 
-// 🔥 FULL LOGGING
 writeLog("electricity.log", "==============================");
-writeLog("electricity.log", "REQUEST ID: $requestId");
-writeLog("electricity.log", "REQUEST DATA: " . json_encode($params));
-writeLog("electricity.log", "RAW RESPONSE: " . $response);
-writeLog("electricity.log", "DECODED RESPONSE: " . json_encode($res));
-writeLog("electricity.log", "HTTP CODE: " . $httpCode);
-writeLog("electricity.log", "CURL ERROR: " . ($err ?: "NONE"));
+writeLog("electricity.log", "REQUEST_ID: $requestId");
+writeLog("electricity.log", "HTTP_CODE: $httpCode");
+writeLog("electricity.log", "CURL_ERROR: " . ($err ?: "NONE"));
+writeLog("electricity.log", "RAW_RESPONSE: " . $response);
 writeLog("electricity.log", "==============================");
 
-
-// ❌ fail → rollback
-if ($err || !$res || ($res['code'] ?? '') !== "000") {
+// Rollback on failure
+if ($err || !$res) {
     mysqli_query($conn, "UPDATE wallet_tbl SET balance='{$wallet['balance']}' WHERE user_id='$userId'");
+    echo json_encode(["success" => false, "message" => "API connection error: " . ($err ?: "No response")]);
+    exit;
+}
 
+$vtCode = $res['code'] ?? '';
+$status = ($vtCode === '000');
+
+if (!$status) {
+    mysqli_query($conn, "UPDATE wallet_tbl SET balance='{$wallet['balance']}' WHERE user_id='$userId'");
     echo json_encode([
         "success" => false,
-        "message" => "Transaction failed, refunded"
+        "message" => "Transaction failed: " . ($res['response_description'] ?? $vtCode),
+        "api_response" => $res
     ]);
     exit;
 }
 
-// 🔥 GET RAW TOKEN FROM CORRECT LOCATION
-$rawToken = $res['token'] 
-         ?? $res['purchased_code'] 
+// Extract electricity token from correct VTPass response path
+// Token is in content.transactions.token or top-level purchased_code
+$rawToken = $res['content']['transactions']['token']
+         ?? $res['content']['transactions']['purchased_code']
+         ?? $res['purchased_code']
+         ?? $res['token']
          ?? '';
 
-// 🔥 CLEAN TOKEN (remove "Token : ")
-$tokenCode = preg_replace('/\D/', '', $rawToken);
-
+// Clean token: VTPass sometimes returns "Token : 1234-5678-..." format
+$tokenCode = preg_replace('/[^0-9\-]/', '', $rawToken);
+$tokenCode = trim($tokenCode, '-');
 if (!$tokenCode) {
-    $tokenCode = "N/A";
+    $tokenCode = $rawToken ?: "N/A";
 }
 
+$transactionId  = $res['content']['transactions']['transactionId'] ?? null;
+$safeDesc       = mysqli_real_escape_string($conn, json_encode($res));
+$safeTransId    = mysqli_real_escape_string($conn, $transactionId ?? '');
+$safeToken      = mysqli_real_escape_string($conn, $tokenCode);
 
-// 💾 Save
+// Save transaction
 mysqli_query($conn, "
-INSERT INTO transactions_tbl 
-(unique_element, amount, email, phone, transaction_id, request_id, product_name, response_description, status, transaction_date, is_bill)
-VALUES 
-('$meter', '$amount', '$email', '$meter', '$tokenCode', '$requestId', 'Electricity', '".mysqli_real_escape_string($conn, json_encode($res))."', 1, NOW(), 1)
+    INSERT INTO transactions_tbl 
+    (unique_element, amount, real_amount, email, phone, transaction_id, request_id, product_name, response_description, status, transaction_date, is_bill, our_commission)
+    VALUES 
+    ('$meter', '$amount', '$amount', '$email', '".($phone ?: $userPhone)."', '$safeTransId', '$requestId', 'Electricity ($serviceID)', '$safeDesc', 1, NOW(), 1, 0)
 ");
 
-// ✅ response
+writeLog("electricity.log", "SUCCESS: token=$tokenCode transactionId=$transactionId");
+
 echo json_encode([
-    "success" => true,
-    "message" => "Electricity purchase successful",
-    "token" => $tokenCode,
-    "balance" => $newBalance
+    "success"        => true,
+    "message"        => "Electricity purchase successful",
+    "token"          => $tokenCode,
+    "balance"        => $newBalance,
+    "request_id"     => $requestId,
+    "transaction_id" => $transactionId,
+    "api_response"   => $res
 ]);
 ?>
