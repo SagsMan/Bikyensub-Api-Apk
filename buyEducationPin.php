@@ -103,12 +103,9 @@ curl_setopt_array($curl, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
     CURLOPT_POSTFIELDS     => json_encode($params),
-    CURLOPT_HTTPHEADER     => [
-        "Content-Type: application/json",
-        "api-key: $apiKey",
-        "secret-key: $secret"
-    ],
-    CURLOPT_TIMEOUT => 30,
+    CURLOPT_USERPWD        => "$apiKey:$secret",
+    CURLOPT_HTTPHEADER     => ["Content-Type: application/json"],
+    CURLOPT_TIMEOUT        => 30,
 ]);
 
 $apiResponse = curl_exec($curl);
