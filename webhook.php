@@ -9,7 +9,8 @@
  *   transaction_status, sender{name,account_number,bank},
  *   receiver{name,account_number,bank}, customer{name,email}, timestamp
  *
- * payment_history_tbl columns: id, trans_id, amount, email, status, reason, super_admin, date_paid
+ * payment_history_tbl columns: id, trans_id, amount, email, status, reason, super_admin(int), date_paid
+ * wallet_history_tbl columns: id, trans_id, email, trans_amount, available_balance, wallet_status, trans_date, super_admin, status
  */
 
 include_once __DIR__ . '/conn.php';
@@ -116,20 +117,34 @@ if (empty($accountNumber) && empty($customerEmail)) {
 // ── Find the user ─────────────────────────────────────────────────────────────
 $user = null;
 
+// 1. By virtual account number in users_tbl
 if (!empty($accountNumber)) {
     $acc = mysqli_real_escape_string($conn, $accountNumber);
     $uq  = mysqli_query($conn, "SELECT id, email, sname FROM users_tbl WHERE (acc_no='$acc' OR acc_no2='$acc') LIMIT 1");
     if ($uq && mysqli_num_rows($uq) > 0) {
         $user = mysqli_fetch_assoc($uq);
+        wh_log("USER: found by account number $accountNumber");
     }
 }
 
+// 2. By customer email in users_tbl
 if (!$user && !empty($customerEmail)) {
     $cemEsc = mysqli_real_escape_string($conn, $customerEmail);
     $uq2    = mysqli_query($conn, "SELECT id, email, sname FROM users_tbl WHERE email='$cemEsc' LIMIT 1");
     if ($uq2 && mysqli_num_rows($uq2) > 0) {
         $user = mysqli_fetch_assoc($uq2);
-        wh_log("USER: found by customer email fallback");
+        wh_log("USER: found by customer email in users_tbl");
+    }
+}
+
+// 3. Fallback: by email directly in wallet_tbl (user registered but acc_no not matched)
+if (!$user && !empty($customerEmail)) {
+    $cemEsc2 = mysqli_real_escape_string($conn, $customerEmail);
+    $uq3     = mysqli_query($conn, "SELECT user_id AS email FROM wallet_tbl WHERE user_id='$cemEsc2' LIMIT 1");
+    if ($uq3 && mysqli_num_rows($uq3) > 0) {
+        $wRow = mysqli_fetch_assoc($uq3);
+        $user = ['id' => 0, 'email' => $wRow['email'], 'sname' => ''];
+        wh_log("USER: found by wallet_tbl email fallback");
     }
 }
 
@@ -142,7 +157,7 @@ $email = $user['email'];
 $em    = mysqli_real_escape_string($conn, $email);
 $ref   = mysqli_real_escape_string($conn, $reference);
 
-wh_log("USER: $email (id=" . $user['id'] . ")");
+wh_log("USER: $email (id=" . ($user['id'] ?? 'wallet-fallback') . ")");
 
 // ── Duplicate check ───────────────────────────────────────────────────────────
 $dup = mysqli_query($conn, "SELECT id FROM payment_history_tbl WHERE trans_id='$ref' LIMIT 1");
@@ -158,7 +173,7 @@ $wq = mysqli_query($conn, "SELECT balance FROM wallet_tbl WHERE user_id='$em' LI
 if ($wq && mysqli_num_rows($wq) > 0) {
     $currentBal = floatval(mysqli_fetch_assoc($wq)['balance']);
     $newBal     = $currentBal + $amount;
-    mysqli_query($conn, "UPDATE wallet_tbl SET balance='$newBal' WHERE user_id='$em'");
+    mysqli_query($conn, "UPDATE wallet_tbl SET balance='$newBal', last_transanction=NOW() WHERE user_id='$em'");
     wh_log("WALLET: N$currentBal → N$newBal");
 } else {
     $newBal = $amount;
@@ -166,15 +181,30 @@ if ($wq && mysqli_num_rows($wq) > 0) {
     wh_log("WALLET: created with N$newBal");
 }
 
-// ── Record in payment_history_tbl ─────────────────────────────────────────────
+// ── Record in payment_history_tbl (super_admin is INT — use 1 for paymentpoint) ──
 $amtEsc    = mysqli_real_escape_string($conn, $amount);
-$reasonEsc = mysqli_real_escape_string($conn, "Wallet funded by $senderName");
-mysqli_query($conn,
+$reasonEsc = mysqli_real_escape_string($conn, "Wallet funded via PaymentPoint by $senderName");
+$phInsert  = mysqli_query($conn,
     "INSERT INTO payment_history_tbl (trans_id, amount, email, status, reason, super_admin, date_paid)
-     VALUES ('$ref', '$amtEsc', '$em', 1, '$reasonEsc', 'paymentpoint', NOW())
-     ON DUPLICATE KEY UPDATE status=1"
+     VALUES ('$ref', '$amtEsc', '$em', 1, '$reasonEsc', 1, NOW())"
 );
-wh_log("HISTORY: recorded");
+if (!$phInsert) {
+    wh_log("WARNING: payment_history insert failed: " . mysqli_error($conn));
+} else {
+    wh_log("HISTORY: recorded in payment_history_tbl");
+}
+
+// ── Record in wallet_history_tbl ──────────────────────────────────────────────
+$newBalInt = intval($newBal);
+$whInsert  = mysqli_query($conn,
+    "INSERT INTO wallet_history_tbl (trans_id, email, trans_amount, available_balance, wallet_status, super_admin, status)
+     VALUES ('$ref', '$em', '$amtEsc', '$newBalInt', 'credit', 1, 1)"
+);
+if (!$whInsert) {
+    wh_log("WARNING: wallet_history insert failed: " . mysqli_error($conn));
+} else {
+    wh_log("WALLET_HISTORY: recorded");
+}
 
 // ── In-app notification ───────────────────────────────────────────────────────
 $title   = 'Wallet Credited';
@@ -183,10 +213,13 @@ $balFmt  = number_format($newBal, 2);
 $message = "N{$amtFmt} has been added to your wallet by {$senderName}. New balance: N{$balFmt}.";
 $msgEsc  = mysqli_real_escape_string($conn, $message);
 $titleEsc= mysqli_real_escape_string($conn, $title);
-mysqli_query($conn,
+$notifInsert = mysqli_query($conn,
     "INSERT INTO notifications_tbl (title, message, type, target, target_email, created_by, is_read_by, status)
      VALUES ('$titleEsc', '$msgEsc', 'success', 'specific', '$em', 'system', '[]', 1)"
 );
+if (!$notifInsert) {
+    wh_log("WARNING: notification insert failed: " . mysqli_error($conn));
+}
 
 // ── FCM push notification ─────────────────────────────────────────────────────
 $tokensQ   = mysqli_query($conn, "SELECT fcm_token FROM device_tokens WHERE email='$em' AND fcm_token != ''");
