@@ -88,10 +88,9 @@ curl_setopt_array($curl, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST => true,
     CURLOPT_POSTFIELDS => json_encode($params),
+    CURLOPT_USERPWD => $api['api_key'] . ':' . $api['secret'],
     CURLOPT_HTTPHEADER => [
         "Content-Type: application/json",
-        "api-key: " . $api['api_key'],
-        "secret-key: " . $api['secret']
     ],
 ]);
 
