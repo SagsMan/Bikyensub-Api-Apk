@@ -48,11 +48,9 @@ if (!password_verify($password, $user['password'])) {
     exit;
 }
 
-$rawToken = bin2hex(random_bytes(32)); // real random token
-$token = password_hash($rawToken, PASSWORD_BCRYPT);
-
-// Optional: store token in DB (recommended)
-mysqli_query($conn, "UPDATE users_tbl SET token='$token' WHERE id=".$user['id']);
+$rawToken = bin2hex(random_bytes(32)); // plain token stored directly for fast lookup
+// Store plain token in DB (fast direct-match lookup in verifyUserToken)
+mysqli_query($conn, "UPDATE users_tbl SET token='$rawToken' WHERE id=".$user['id']);
 if (empty($user['pin'])){
     $haspin = false;
 }else{
