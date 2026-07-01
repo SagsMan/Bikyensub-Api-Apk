@@ -35,12 +35,13 @@ if ($pin !== "fingerprint") {
     }
 }
 
+// serviceID = VTPass service, variation = variation_code, amount = price
 $services = [
-    "waec"   => ["variation" => "waecdirect", "amount" => 3500],
-    "neco"   => ["variation" => "neco",       "amount" => 1200],
-    "nabteb" => ["variation" => "nabteb",     "amount" => 1000],
-    "nbais"  => ["variation" => "nbais",      "amount" => 1000],
-    "jamb"   => ["variation" => "utme",       "amount" => 7000]
+    "waec"   => ["serviceID" => "waec",   "variation" => "waecdirect",  "amount" => 900],
+    "neco"   => ["serviceID" => "neco",   "variation" => "neco",        "amount" => 1200],
+    "nabteb" => ["serviceID" => "nabteb", "variation" => "nabteb",      "amount" => 1000],
+    "nbais"  => ["serviceID" => "nbais",  "variation" => "nbais",       "amount" => 1000],
+    "jamb"   => ["serviceID" => "jamb",   "variation" => "utme-no-mock","amount" => 6200]
 ];
 
 if (!isset($services[$service])) {
@@ -48,8 +49,9 @@ if (!isset($services[$service])) {
     exit;
 }
 
-$variation = $services[$service]['variation'];
-$amount    = $services[$service]['amount'];
+$vtServiceID = $services[$service]['serviceID'];
+$variation   = $services[$service]['variation'];
+$amount      = $services[$service]['amount'];
 
 if ($service === "jamb" && !$profileId) {
     echo json_encode(["success" => false, "message" => "JAMB Profile ID required"]);
@@ -76,34 +78,36 @@ if (!$api) {
     exit;
 }
 
-$apiUrl = $api['api_url'];
-$apiKey = $api['api_key'];
-$secret = $api['secret'];
+// VTPass endpoint: base URL + /api/pay
+$apiUrl = rtrim($api['api_url'], '/') . "/api/pay";
+
+// Education services on VTPass require email:password Basic Auth
+// (api_key:secret works for cable TV but not for WAEC/JAMB)
+$vtpassEmail = "bikyenemporium@gmail.com";
+$vtpassPass  = "08056979855@Bi";
 
 // request_id >= 20 chars (VTPass requirement)
 $requestId = date('YmdHis') . 'EDU' . rand(100000, 999999);
 
 $params = [
     "request_id"     => $requestId,
-    "serviceID"      => $service,
+    "serviceID"      => $vtServiceID,
     "variation_code" => $variation,
     "amount"         => $amount,
     "phone"          => $number ?: "08000000000"
 ];
 
-// JAMB also requires billersCode (profile ID)
 if ($service === "jamb") {
     $params["billersCode"] = $profileId;
 }
 
 $curl = curl_init();
-
 curl_setopt_array($curl, [
     CURLOPT_URL            => $apiUrl,
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
     CURLOPT_POSTFIELDS     => json_encode($params),
-    CURLOPT_USERPWD        => "$apiKey:$secret",
+    CURLOPT_USERPWD        => "$vtpassEmail:$vtpassPass",
     CURLOPT_HTTPHEADER     => ["Content-Type: application/json"],
     CURLOPT_TIMEOUT        => 30,
 ]);
@@ -111,7 +115,6 @@ curl_setopt_array($curl, [
 $apiResponse = curl_exec($curl);
 $curlError   = curl_error($curl);
 $httpCode    = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-
 curl_close($curl);
 
 $res = json_decode($apiResponse, true);
@@ -121,7 +124,7 @@ if ($curlError || !$res) {
     echo json_encode([
         "success"      => false,
         "message"      => "Service unavailable",
-        "raw_response" => $apiResponse,
+        "raw_response" => substr($apiResponse, 0, 200),
         "http_code"    => $httpCode
     ]);
     exit;
@@ -133,13 +136,23 @@ if (!$status) {
     mysqli_query($conn, "UPDATE wallet_tbl SET balance='{$wallet['balance']}' WHERE user_id='$userId'");
 }
 
-// Extract PIN(s)
+// Extract PINs
 $pins = [];
-
 if ($service === "jamb") {
     $purchased = $res['purchased_code'] ?? $res['Pin'] ?? null;
+    if ($purchased) $pins[] = ["Pin" => $purchased];
+} elseif ($service === "waec") {
+    // WAEC PINs come as "Serial No:..., pin: ...||..." in purchased_code
+    $purchased = $res['purchased_code'] ?? '';
     if ($purchased) {
-        $pins[] = ["Pin" => $purchased];
+        foreach (explode('||', $purchased) as $part) {
+            $part = trim($part);
+            if ($part) $pins[] = ["Pin" => $part];
+        }
+    }
+    // Fallback: cards array
+    if (empty($pins)) {
+        $pins = $res['content']['transactions']['cards'] ?? [];
     }
 } else {
     $pins = $res['content']['transactions']['cards'] ?? [];
